@@ -34,7 +34,7 @@ fn main() {
                 Some(std::thread::spawn(move || {
                     monoio::utils::bind_to_cpu_set(std::iter::once(i)).unwrap();
                     let mut rt = RuntimeBuilder::<monoio::IoUringDriver>::new()
-                        // .with_entries(32768)
+                        .with_entries(32768)
                         .build()
                         .unwrap();
                     rt.block_on(async move {
