@@ -32,7 +32,7 @@ fn main() {
                 let counter = counter.clone();
                 let url = opt.url.clone();
                 Some(std::thread::spawn(move || {
-                    monoio::utils::bind_to_cpu_set(std::iter::once(i)).unwrap();
+                    // monoio::utils::bind_to_cpu_set(std::iter::once(i)).unwrap();
                     let mut rt = RuntimeBuilder::<monoio::IoUringDriver>::new()
                         .with_entries(32768)
                         .build()
