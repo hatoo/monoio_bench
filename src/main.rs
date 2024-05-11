@@ -3,7 +3,7 @@ use std::sync::{atomic::AtomicUsize, atomic::Ordering::Relaxed, Arc};
 use clap::Parser;
 use http_body_util::{BodyExt, Empty};
 use hyper::{body::Bytes, Request, Uri};
-use monoio::{io::IntoPollIo, net::TcpStream};
+use monoio::{io::IntoPollIo, net::TcpStream, RuntimeBuilder};
 use monoio_compat::hyper::MonoioIo;
 
 #[derive(Parser, Debug)]
@@ -15,54 +15,71 @@ struct Opt {
     c: usize,
 }
 
-#[monoio::main]
-async fn main() {
+fn main() {
     let opt = Opt::parse();
 
     let counter = Arc::new(AtomicUsize::new(0));
 
+    let cpus = num_cpus::get();
+
     let now = std::time::Instant::now();
-    let futures: Vec<_> = (0..opt.c)
-        .map(|_| {
-            let counter = counter.clone();
-            let url = opt.url.clone();
 
-            monoio::spawn(async move {
-                loop {
-                    let Ok(stream) =
-                        TcpStream::connect((url.host().unwrap(), url.port_u16().unwrap_or(80)))
+    let threads: Vec<_> = (0..cpus)
+        .filter_map(|i| {
+            let num_connection = opt.c / cpus + (if (opt.c % cpus) > i { 1 } else { 0 });
+
+            if num_connection > 0 {
+                let counter = counter.clone();
+                let url = opt.url.clone();
+                Some(std::thread::spawn(move || {
+                    monoio::utils::bind_to_cpu_set(std::iter::once(i)).unwrap();
+                    let mut rt = RuntimeBuilder::<monoio::IoUringDriver>::new()
+                        .with_entries(32768)
+                        .build()
+                        .unwrap();
+                    rt.block_on(async move {
+                        loop {
+                            let Ok(stream) = TcpStream::connect((
+                                url.host().unwrap(),
+                                url.port_u16().unwrap_or(80),
+                            ))
                             .await
-                            .and_then(|stream| stream.into_poll_io())
-                    else {
-                        continue;
-                    };
-
-                    let io = MonoioIo::new(stream);
-                    let Ok((mut sender, conn)) = hyper::client::conn::http1::handshake(io).await
-                    else {
-                        continue;
-                    };
-                    monoio::spawn(conn);
-
-                    loop {
-                        if counter.fetch_add(1, Relaxed) < opt.n {
-                            let req = Request::get(&url).body(Empty::<Bytes>::new()).unwrap();
-                            let Ok(mut res) = sender.send_request(req).await else {
-                                break;
+                            .and_then(|stream| stream.into_poll_io()) else {
+                                continue;
                             };
-                            // dbg!(res.status());
-                            while let Some(_next) = res.frame().await {}
-                        } else {
-                            return;
+
+                            let io = MonoioIo::new(stream);
+                            let Ok((mut sender, conn)) =
+                                hyper::client::conn::http1::handshake(io).await
+                            else {
+                                continue;
+                            };
+                            monoio::spawn(conn);
+
+                            loop {
+                                if counter.fetch_add(1, Relaxed) < opt.n {
+                                    let req =
+                                        Request::get(&url).body(Empty::<Bytes>::new()).unwrap();
+                                    let Ok(mut res) = sender.send_request(req).await else {
+                                        break;
+                                    };
+                                    // dbg!(res.status());
+                                    while let Some(_next) = res.frame().await {}
+                                } else {
+                                    return;
+                                }
+                            }
                         }
-                    }
-                }
-            })
+                    });
+                }))
+            } else {
+                None
+            }
         })
         .collect();
 
-    for f in futures {
-        f.await;
+    for t in threads {
+        t.join().unwrap();
     }
 
     let elapsed = now.elapsed();
