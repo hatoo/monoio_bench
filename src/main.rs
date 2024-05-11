@@ -34,41 +34,54 @@ fn main() {
                 Some(std::thread::spawn(move || {
                     monoio::utils::bind_to_cpu_set(std::iter::once(i)).unwrap();
                     let mut rt = RuntimeBuilder::<monoio::IoUringDriver>::new()
-                        .with_entries(32768)
+                        // .with_entries(32768)
                         .build()
                         .unwrap();
                     rt.block_on(async move {
-                        loop {
-                            let Ok(stream) = TcpStream::connect((
-                                url.host().unwrap(),
-                                url.port_u16().unwrap_or(80),
-                            ))
-                            .await
-                            .and_then(|stream| stream.into_poll_io()) else {
-                                continue;
-                            };
+                        let futures: Vec<_> = (0..num_connection)
+                            .map(|_| {
+                                let counter = counter.clone();
+                                let url = url.clone();
+                                monoio::spawn(async move {
+                                    loop {
+                                        let Ok(stream) = TcpStream::connect((
+                                            url.host().unwrap(),
+                                            url.port_u16().unwrap_or(80),
+                                        ))
+                                        .await
+                                        .and_then(|stream| stream.into_poll_io()) else {
+                                            continue;
+                                        };
 
-                            let io = MonoioIo::new(stream);
-                            let Ok((mut sender, conn)) =
-                                hyper::client::conn::http1::handshake(io).await
-                            else {
-                                continue;
-                            };
-                            monoio::spawn(conn);
+                                        let io = MonoioIo::new(stream);
+                                        let Ok((mut sender, conn)) =
+                                            hyper::client::conn::http1::handshake(io).await
+                                        else {
+                                            continue;
+                                        };
+                                        monoio::spawn(conn);
 
-                            loop {
-                                if counter.fetch_add(1, Relaxed) < opt.n {
-                                    let req =
-                                        Request::get(&url).body(Empty::<Bytes>::new()).unwrap();
-                                    let Ok(mut res) = sender.send_request(req).await else {
-                                        break;
-                                    };
-                                    // dbg!(res.status());
-                                    while let Some(_next) = res.frame().await {}
-                                } else {
-                                    return;
-                                }
-                            }
+                                        loop {
+                                            if counter.fetch_add(1, Relaxed) < opt.n {
+                                                let req = Request::get(&url)
+                                                    .body(Empty::<Bytes>::new())
+                                                    .unwrap();
+                                                let Ok(mut res) = sender.send_request(req).await
+                                                else {
+                                                    break;
+                                                };
+                                                // dbg!(res.status());
+                                                while let Some(_next) = res.frame().await {}
+                                            } else {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                })
+                            })
+                            .collect();
+                        for f in futures {
+                            f.await;
                         }
                     });
                 }))
